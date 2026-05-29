@@ -1,0 +1,50 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+
+  # Common settings
+  config.vm.box = "generic/rhel9"
+  config.vm.box_check_update = false
+
+  # Define nodes hash
+  nodes = {
+    "control" => { ip: "192.168.56.10", memory: 2048, cpus: 2 },
+    "node1"   => { ip: "192.168.56.11", memory: 1024, cpus: 1 },
+    "node2"   => { ip: "192.168.56.12", memory: 1024, cpus: 1 },
+    "node3"   => { ip: "192.168.56.13", memory: 1024, cpus: 1 },
+    "node4"   => { ip: "192.168.56.14", memory: 1024, cpus: 1 },
+    "node5"   => { ip: "192.168.56.15", memory: 1024, cpus: 1 },
+  }
+
+  nodes.each do |name, opts|
+    config.vm.define name do |node|
+
+      node.vm.hostname = name
+      node.vm.network "private_network", ip: opts[:ip]
+
+      node.vm.provider "virtualbox" do |vb|
+        vb.name   = name
+        vb.memory = opts[:memory]
+        vb.cpus   = opts[:cpus]
+      end
+
+      # Common provisioning for all nodes
+      node.vm.provision "shell", inline: <<-SHELL
+        echo "Provisioning #{name}..."
+        sudo dnf update -y
+        sudo dnf install -y vim curl wget net-tools
+      SHELL
+
+      # Extra provisioning for control node only
+      if name == "control"
+        node.vm.provision "shell", inline: <<-SHELL
+          echo "Setting up control node extras..."
+          sudo dnf install -y ansible-core
+        SHELL
+      end
+
+    end
+  end
+
+end
