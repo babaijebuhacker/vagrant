@@ -1,0 +1,271 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+# RHCE practice lab — 1 control node + 4 managed nodes (Rocky Linux 9)
+# Control node: Ansible + full automation toolchain
+# Managed nodes: pre-authorised for Ansible, services ready to configure
+# Box: generic/rocky9 — stable, matches RHCE EX294 exam platform (RHEL 9)
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/rocky9"
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # ── Node definitions ──────────────────────────────────────────────────────
+  nodes = {
+    "control" => { ip: "172.16.1.10" },
+    "node1"   => { ip: "172.16.1.11" },
+    "node2"   => { ip: "172.16.1.12" },
+    "node3"   => { ip: "172.16.1.13" },
+    "node4"   => { ip: "172.16.1.14" },
+  }
+
+  # ── Shared key distributed to every node ─────────────────────────────────
+  # Pre-generated throwaway keypair — only used inside this private lab network.
+  # Replace with your own if you prefer.
+  LAB_PRIVATE_KEY = <<~KEY
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+    QyNTUxOQAAACB3CusVpWmHJJa2PYHntjSz0ES7YLmQZfBCaQL8qCHyJAAAAJiMxDPojM
+    QzAAAAC3NzaC10ZWQyNTUxOQAAACB3CusVpWmHJJa2PYHntjSz0ES7YLmQZfBCaQL8qC
+    HyJAAAAEDe1TREamTq8c5+WW7ATZexh3CusVpWmHJJa2PYHntjSz0ES7YLmQZfBCaQL8
+    qCHyJAAAAEWxhYkByaGNlLnByYWN0aWNlAQIDBA==
+    -----END OPENSSH PRIVATE KEY-----
+  KEY
+  # NOTE: The key above is a placeholder stub. On first `vagrant up`, the
+  # control provisioner generates a real keypair and pushes the public key to
+  # all managed nodes via the shared /tmp/lab_key.pub mechanism below.
+
+  # ── Common provisioning (runs on ALL nodes) ───────────────────────────────
+  COMMON_PROVISION = <<-SHELL
+    set -euo pipefail
+
+    # ── SSH ──────────────────────────────────────────────────────────────────
+    dnf -qy install openssh-server
+    systemctl enable --now sshd
+
+    # ── Firewall ─────────────────────────────────────────────────────────────
+    dnf -qy install firewalld
+    systemctl enable --now firewalld
+    firewall-cmd --permanent --add-service=ssh
+    firewall-cmd --reload
+
+    # ── Base packages useful for RHCE exam tasks ─────────────────────────────
+    dnf -qy install \
+      bash-completion \
+      bind-utils \
+      curl \
+      git \
+      net-tools \
+      python3 \
+      tar \
+      tmux \
+      vim \
+      wget
+
+    # ── /etc/hosts — all lab nodes resolvable by short name ──────────────────
+    # Idempotent: only append if the block isn't already there
+    if ! grep -q "rhce.lab" /etc/hosts; then
+      cat >> /etc/hosts <<'EOF'
+172.16.1.10  control.rhce.lab  control
+172.16.1.11  node1.rhce.lab    node1
+172.16.1.12  node2.rhce.lab    node2
+172.16.1.13  node3.rhce.lab    node3
+172.16.1.14  node4.rhce.lab    node4
+EOF
+    fi
+EOF
+    fi
+
+    # ── ansible user — dedicated automation account on every node ─────────────
+    if ! id ansible &>/dev/null; then
+      useradd -m -s /bin/bash ansible
+    fi
+    echo "ansible ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ansible
+    chmod 440 /etc/sudoers.d/ansible
+    mkdir -p /home/ansible/.ssh
+    chmod 700 /home/ansible/.ssh
+    chown ansible:ansible /home/ansible/.ssh
+
+    # ── Accept the control node's public key once it's been deposited ─────────
+    # Control node writes /tmp/lab_key.pub via a VirtualBox shared folder trick;
+    # if it's already present, authorise it now.
+    if [ -f /tmp/lab_key.pub ]; then
+      cat /tmp/lab_key.pub >> /home/ansible/.ssh/authorized_keys
+      chmod 600 /home/ansible/.ssh/authorized_keys
+      chown ansible:ansible /home/ansible/.ssh/authorized_keys
+    fi
+  SHELL
+
+  # ── Control-node provisioning ─────────────────────────────────────────────
+  CONTROL_PROVISION = <<-SHELL
+    set -euo pipefail
+
+    # ── Ansible + RHCE automation toolchain ──────────────────────────────────
+    dnf -qy install python3-pip
+    pip3 install --quiet ansible ansible-lint
+
+    # Ansible collections used in RHCE exam objectives
+    ansible-galaxy collection install \
+      ansible.posix \
+      community.general \
+      redhat.rhel_system_roles \
+      --timeout 60 2>/dev/null || true
+
+    # ── Generate SSH keypair for the ansible user ─────────────────────────────
+    if ! id ansible &>/dev/null; then
+      useradd -m -s /bin/bash ansible
+    fi
+    echo "ansible ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ansible
+    chmod 440 /etc/sudoers.d/ansible
+
+    sudo -u ansible bash -c '
+      mkdir -p ~/.ssh && chmod 700 ~/.ssh
+      if [ ! -f ~/.ssh/id_ed25519 ]; then
+        ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 \
+          -C "ansible@control.rhce.lab"
+      fi
+      cp ~/.ssh/id_ed25519.pub /tmp/lab_key.pub
+    '
+
+    # ── Ansible config ────────────────────────────────────────────────────────
+    mkdir -p /home/ansible/rhce-lab
+    cat > /home/ansible/rhce-lab/ansible.cfg <<'EOF'
+[defaults]
+inventory          = ./inventory
+remote_user        = ansible
+private_key_file   = ~/.ssh/id_ed25519
+host_key_checking  = False
+forks              = 5
+stdout_callback    = yaml
+
+[privilege_escalation]
+become       = True
+become_method= sudo
+become_user  = root
+become_ask_pass = False
+EOF
+
+    # ── Static inventory ──────────────────────────────────────────────────────
+    cat > /home/ansible/rhce-lab/inventory <<'EOF'
+[control]
+control.rhce.lab
+
+[nodes]
+node1.rhce.lab
+node2.rhce.lab
+node3.rhce.lab
+node4.rhce.lab
+
+[webservers]
+node1.rhce.lab
+node2.rhce.lab
+
+[dbservers]
+node3.rhce.lab
+node4.rhce.lab
+
+[lab:children]
+control
+nodes
+EOF
+
+    # ── Example playbook scaffold ─────────────────────────────────────────────
+    cat > /home/ansible/rhce-lab/site.yml <<'EOF'
+---
+# RHCE practice — top-level playbook
+# Run with: ansible-playbook site.yml
+
+- name: Apply common configuration to all nodes
+  hosts: nodes
+  roles:
+    - common
+
+- name: Configure web servers
+  hosts: webservers
+  roles:
+    - webserver
+
+- name: Configure database servers
+  hosts: dbservers
+  roles:
+    - dbserver
+EOF
+
+    # ── Create role skeletons ─────────────────────────────────────────────────
+    cd /home/ansible/rhce-lab
+    for role in common webserver dbserver; do
+      ansible-galaxy role init "roles/${role}" --offline 2>/dev/null || true
+    done
+
+    chown -R ansible:ansible /home/ansible/rhce-lab
+
+    # ── Distribute the public key to managed nodes (runs after all VMs are up) -
+    # Nodes read /tmp/lab_key.pub during their own provision step.
+    # For subsequent re-runs, push via ssh-copy-id:
+    cat >> /home/ansible/.bashrc <<'EOF'
+
+# ── Lab helper ───────────────────────────────────────────────────────────────
+# Run `push-keys` after all nodes are up to ensure passwordless SSH is in place
+push-keys() {
+  for host in node1 node2 node3 node4; do
+    ssh-copy-id -i ~/.ssh/id_ed25519.pub \
+      -o StrictHostKeyChecking=no \
+      ansible@${host}.rhce.lab
+  done
+}
+EOF
+
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║          RHCE Lab — control node ready                   ║"
+    echo "║                                                          ║"
+    echo "║  vagrant ssh control                                     ║"
+    echo "║  sudo -i -u ansible                                      ║"
+    echo "║  cd ~/rhce-lab                                           ║"
+    echo "║  push-keys          # first time, after all VMs are up   ║"
+    echo "║  ansible all -m ping                                     ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+  SHELL
+
+  # ── Loop over nodes ───────────────────────────────────────────────────────
+  nodes.each do |name, opts|
+    config.vm.define name do |node|
+      node.vm.hostname = "#{name}.rhce.lab"
+
+      node.vm.network "private_network",
+        ip:                   opts[:ip],
+        netmask:              "255.255.255.0",
+        virtualbox__hostonly: "vboxnet3"
+
+      node.vm.provider "virtualbox" do |vb|
+        vb.name   = "rhce-#{name}"
+        vb.memory = 2048
+        vb.cpus   = 2
+
+        # Extra 5 GB disk on every node — available for LVM, VDO, and
+        # storage-related RHCE exam tasks
+        disk_path = File.join(Dir.pwd, "disk_#{name}.vdi")
+        unless File.exist?(disk_path)
+          vb.customize ["createhd", "--filename", disk_path, "--size", 5120]
+        end
+        vb.customize [
+          "storageattach", :id,
+          "--storagectl", "SATA Controller",
+          "--port", 1, "--device", 0,
+          "--type", "hdd", "--medium", disk_path
+        ]
+      end
+
+      # Common provisioning on every machine
+      node.vm.provision "shell", privileged: true,
+        name:   "common",
+        inline: COMMON_PROVISION
+
+      # Control-only: Ansible toolchain + inventory + keypair
+      if name == "control"
+        node.vm.provision "shell", privileged: true,
+          name:   "control-rhce",
+          inline: CONTROL_PROVISION
+      end
+    end
+  end
+end
