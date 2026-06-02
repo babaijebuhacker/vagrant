@@ -1,0 +1,66 @@
+pacman -Syy 
+pacman -S pikvm-os-updater 
+pikvm-update 
+passwd root 
+kvmd-htpasswd set admin 
+pacman -S tailscale-pikvm 
+systemctl enable --now tailscaled 
+tailscale up
+
+command to chnage name of Monitor 
+kvmd-edidconf --set-monitor-name=TOSHIBA --set-mfc-id=TTP --set-product-id=34953 --set-serial=2290649089 --apply
+
+
+
+
+What is USB HID Proxy Mode?
+•	HID (Human Interface Device) Proxy mode makes PiKVM present itself to Windows only as a standard USB keyboard and mouse.
+•	It prevents detection as a custom KVM device, reducing the chance of driver blocks or USB policy restrictions.
+1. Start HID (Keyboard & Mouse) Emulation
+
+
+sudo kvmd-otg start
+Then verify HID devices:
+
+
+ls -l /dev/hidg*
+If you see /dev/hidg0, /dev/hidg1, etc., HID is active.
+________________________________________
+2. Enable HID on Boot (Persistent Setting)
+If you want HID to start automatically:
+
+
+sudo systemctl enable --now kvmd
+________________________________________
+3. Restart the Pi-KVM Service
+
+
+sudo systemctl restart kvmd
+________________________________________
+4. Check KVMD Logs for Errors
+If HID still isn’t working, check:
+
+
+journalctl -u kvmd --no-pager --no-full | tail -20
+
+Update yaml > Replace everything with this 
+
+vi /etc/kvmd/override.yaml
+otg:
+  config: Logitech
+  manufacturer: Logitech, Inc.
+  product: Logitech Keyboard + Mice
+  vendor: 0x045D
+  product_id: 0xc528
+  serial: CR5665464XB3033
+  devices:
+    audio:
+      enabled: true
+  mode: hid
+  hid:
+    keyboard: true
+    mouse: true
+
+kvmd:
+  msd:
+    type: disabled
